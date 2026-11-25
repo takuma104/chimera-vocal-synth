@@ -618,6 +618,28 @@ impl HumanFrame {
     }
 }
 
+/// The tube above the glottis (ventricle, ventricular folds, vestibule): its length and its
+/// areas, apart from the body's size. Its quarter-wave resonance is the voice's fourth formant
+/// region, and the body's scaling alone leaves that resonance high (a woman's tube came out
+/// 1.8 cm long, its resonance near 4.7 kHz, where real women have theirs near 4 kHz). The
+/// defaults are the constants the tube had, so a voice that sets nothing sounds as before.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LaryngealTube {
+    /// times the length the body gives the tube (2.4 cm × scale × pharynx). Only the acoustic
+    /// length: the drawn height of the tube's top stays the body's
+    pub length: f64,
+    /// area of the laryngeal ventricle (cm², before scale)
+    pub ventricle: f64,
+    /// area of the tube where it leaves the ventricular folds (cm², before scale)
+    pub tube: f64,
+    /// area of the tube's top with the epilarynx at 0 (cm², before scale)
+    pub wide: f64,
+    /// area of the tube's top with the epilarynx at 1 (cm², before scale)
+    pub narrow: f64,
+}
+
+pub const LARYNGEAL_TUBE: LaryngealTube = LaryngealTube { length: 1.0, ventricle: 1.3, tube: 1.2, wide: 1.9, narrow: 0.35 };
+
 #[derive(Clone, Debug)]
 pub struct HumanVocalTract {
     pub body: HumanBody,
@@ -638,6 +660,8 @@ pub struct HumanVocalTract {
     pub contact_tip_n: Vec2,
     pub contact_body_n: Vec2,
     pub area_law: AreaLaw,
+    /// the tube above the glottis; the engine's own unless a caller sets it
+    pub laryngeal_tube: LaryngealTube,
 }
 
 impl HumanVocalTract {
@@ -658,6 +682,7 @@ impl HumanVocalTract {
             contact_tip_n: v(0.0, -1.0),
             contact_body_n: v(0.0, -1.0),
             area_law: AreaLaw { pharynx: (2.0, 1.4), oral: (2.6, 1.4), front: (2.0, 1.4), ahead: (1.6, 1.4) },
+            laryngeal_tube: LARYNGEAL_TUBE,
         };
         let p = |x: f64, y: f64| t.p(x, y);
         // posterior pharyngeal wall, bottom → top (curving forward into nasopharynx roof)
@@ -1209,7 +1234,7 @@ impl HumanVocalTract {
         }
 
         // ---- centreline s
-        let epi_len = 2.4 * k * self.body.pharynx;
+        let epi_len = 2.4 * k * self.body.pharynx * self.laryngeal_tube.length;
         let mut s = epi_len;
         for i in 0..grid.len() {
             if i > 0 {
@@ -1266,9 +1291,10 @@ impl HumanVocalTract {
     pub fn epilarynx_area(&self, a: &HumanArtic, s: f64, epi_len: f64) -> f64 {
         let u = s / epi_len;
         let vent = 0.95 * (1.0 - 0.75 * clamp(a.ventricular, 0.0, 1.0));
-        let top = lerp(1.9, 0.35, clamp(a.epilarynx, 0.0, 1.0));
+        let t = self.laryngeal_tube;
+        let top = lerp(t.wide, t.narrow, clamp(a.epilarynx, 0.0, 1.0));
         // laryngeal ventricle, ventricular folds, then the tube to its top
-        let f = |x: f64| if x < 0.3 { 1.3 } else if x < 0.5 { vent } else { lerp(1.2, top, (x - 0.5) / 0.5) };
+        let f = |x: f64| if x < 0.3 { t.ventricle } else if x < 0.5 { vent } else { lerp(t.tube, top, (x - 0.5) / 0.5) };
         // the steps between them are short ramps: a section boundary sliding across a step made
         // that section's area jump
         let r = 0.03;
@@ -1286,7 +1312,7 @@ impl HumanVocalTract {
     /// exact closures). Returns (phLen, orLen).
     #[allow(clippy::too_many_arguments)]
     pub fn resample(&self, a: &HumanArtic, f: &HumanFrame, out_ph: &mut [f64], out_or: &mut [f64], min_ph: Option<&mut [f64]>, min_or: Option<&mut [f64]>) -> (f64, f64) {
-        let epi_len = 2.4 * self.k * self.body.pharynx;
+        let epi_len = 2.4 * self.k * self.body.pharynx * self.laryngeal_tube.length;
         let g = &f.grid;
         // the epilarynx's last few millimetres flare into the pharynx (no step at its top)
         let flare = 0.1 * epi_len;
