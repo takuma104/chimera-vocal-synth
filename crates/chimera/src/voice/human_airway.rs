@@ -6,7 +6,7 @@
 
 use crate::airway::network::{AirwayNetwork, Area, NoiseSpec, PortSpec, Tube, TubeSpec};
 use crate::anatomy::human::{HumanArtic, HumanBody, HumanFrame, HumanVocalTract};
-use crate::math::{js_max, js_min, js_round, smoothstep as smooth, sqrt};
+use crate::math::{exp, js_max, js_min, js_round, smoothstep as smooth, sqrt};
 use crate::physics::{C_SOUND, RHO, WALL_NASAL, WALL_SOFT, WALL_TRACHEA};
 
 #[derive(Clone, Copy, Debug)]
@@ -66,6 +66,10 @@ pub struct HumanAirway {
     base_dt: f64,
     noise_list: Vec<NoiseSpec>,
     scratch_frame: HumanFrame,
+    /// A tract of one's own (`set_area_profile`): what was asked for, and what each section's
+    /// area is multiplied by (pharynx then oral). Both empty by default: the anatomy's areas.
+    area_profile: Vec<f64>,
+    area_gain: Vec<f64>,
 }
 
 impl HumanAirway {
@@ -158,7 +162,35 @@ impl HumanAirway {
             base_dt: 0.0,
             noise_list: Vec::with_capacity(8),
             scratch_frame: HumanFrame::with_capacity(),
+            area_profile: Vec::new(),
+            area_gain: Vec::new(),
         }
+    }
+
+    /// Give the tract a shape of its own on top of the anatomy's: `logs` are natural logarithms
+    /// of what the cross-section is multiplied by at places equally far apart from the glottis
+    /// (the first) to the lips (the last), with straight lines between them; whatever the
+    /// articulators do, the area they give at a place is multiplied by that. Empty: none (the
+    /// default). Two speakers of one size differ in where their tracts are wide and narrow, and
+    /// the upper resonances go by that; the anatomy here has one shape for all.
+    pub fn set_area_profile(&mut self, logs: &[f64]) {
+        self.area_profile = logs.to_vec();
+        let n = self.n_ph + self.n_or;
+        self.area_gain = match logs.len() {
+            0 => Vec::new(),
+            1 => vec![exp(logs[0]); n],
+            m => (0..n)
+                .map(|i| {
+                    let u = (i as f64 + 0.5) / n as f64 * (m - 1) as f64;
+                    let j = (u as usize).min(m - 2);
+                    exp(logs[j] + (logs[j + 1] - logs[j]) * (u - j as f64))
+                })
+                .collect(),
+        };
+    }
+
+    pub fn area_profile(&self) -> &[f64] {
+        &self.area_profile
     }
 
     /// Internal branch index helpers
@@ -192,6 +224,15 @@ impl HumanAirway {
         let mut f = self.frame.take().unwrap_or_else(|| core::mem::take(&mut self.scratch_frame));
         self.tract.compute(a, &mut f);
         let (ph_len, or_len) = self.tract.resample(a, &f, &mut self.ph_areas, &mut self.or_areas, Some(&mut self.ph_min), Some(&mut self.or_min));
+        if !self.area_gain.is_empty() {
+            let (ph, or) = self.area_gain.split_at(self.n_ph);
+            for (areas, mins, gains) in [(&mut self.ph_areas, &mut self.ph_min, ph), (&mut self.or_areas, &mut self.or_min, or)] {
+                for i in 0..gains.len() {
+                    areas[i] *= gains[i];
+                    mins[i] *= gains[i];
+                }
+            }
+        }
         if dt > 0.0
             && let Some(base) = &self.base
         {

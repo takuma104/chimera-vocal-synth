@@ -169,3 +169,28 @@ fn a_strong_wall_layer_stays_stable_on_a_narrow_section() {
     }
     assert!(tail < peak * 0.01, "tail {tail:e} vs peak {peak:e}");
 }
+
+/// A tract of one's own (`HumanAirway::set_area_profile`): a profile of zeros is the anatomy's
+/// tract, one that narrows the front half moves the resonances, and taking it away brings the
+/// anatomy's back.
+#[test]
+fn an_area_profile_of_zeros_changes_nothing_and_another_moves_the_resonances() {
+    use chimera::anatomy::human::{BodyMix, HumanArtic, NEUTRAL};
+    use chimera::phonetics::planner::vowel_artic;
+    use chimera::voice::human_airway::HumanAirway;
+    let a: HumanArtic = vowel_artic("a", BodyMix::MALE).unwrap().apply_to(&NEUTRAL);
+    let freqs: Vec<f64> = linspace(100.0, 5000.0, 2000);
+    let resonances = |w: &mut HumanAirway, logs: &[f64]| -> Vec<f64> {
+        w.set_area_profile(logs);
+        w.apply(&a, 0.0);
+        let h = transfer_function(&w.net.linear_elements(), w.pharynx.first_node(), &freqs, &[w.glottis_port]);
+        find_peaks(&freqs, &h.mag, 150.0).iter().map(|p| p.freq).take(4).collect()
+    };
+    let mut w = HumanAirway::new(96000.0, BodyMix::MALE.body());
+    let plain = resonances(&mut w, &[]);
+    assert_eq!(resonances(&mut w, &[0.0; 6]), plain);
+    let own = resonances(&mut w, &[0.0, 0.0, 0.0, -0.7, -0.7, -0.7]);
+    println!("as the anatomy has it {plain:.0?} Hz; with the front half at half its area {own:.0?} Hz");
+    assert!(plain.iter().zip(&own).any(|(p, o)| (p - o).abs() / p > 0.03), "{plain:?} against {own:?}");
+    assert_eq!(resonances(&mut w, &[]), plain);
+}
