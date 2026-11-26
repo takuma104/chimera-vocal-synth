@@ -155,6 +155,9 @@ pub struct LinearElements {
     pub wall_r: Vec<f64>,
     pub wall_k: Vec<f64>,
     pub wall_rad: Vec<f64>,
+    /// the walls' second layer (see `AirwayNetwork::layer_r`); 0 resistance: none
+    pub layer_r: f64,
+    pub layer_k: f64,
     pub fixed: Vec<bool>,
     pub rad_nodes: Vec<usize>,
     pub rad_area: Vec<f64>,
@@ -272,6 +275,16 @@ pub struct AirwayNetwork {
     has_wall: Vec<bool>,
     pub wall_y: Vec<f64>,
     wall_v: Vec<f64>,
+    /// A second layer at the walls of every tube that has a wall: a resistance (dyn·s/cm³) and a
+    /// stiffness (dyn/cm³) per unit area, with no mass. Its conductance grows with the square of
+    /// the frequency up to its corner k/(2πr) and is S/r above it, so it damps the upper
+    /// resonances and leaves the lowest alone: what the tube's own losses (a viscous resistance
+    /// that does not grow with frequency, a wall that is all mass above some hundred hertz) do
+    /// not, and real tracts do (their third and higher formants are some hundred hertz wide,
+    /// these were 20-40 Hz in a rounded vowel). 0 resistance: none, and the airway as it was.
+    pub layer_r: f64,
+    pub layer_k: f64,
+    layer_y: Vec<f64>,
     /// per-node wall volume velocity (telemetry)
     pub wall_u: Vec<f64>,
     node_tube: Vec<usize>,
@@ -381,6 +394,9 @@ impl AirwayNetwork {
             wall_rad: Vec::new(),
             has_wall: Vec::new(),
             wall_y: Vec::new(),
+            layer_r: 0.0,
+            layer_k: 0.0,
+            layer_y: Vec::new(),
             wall_v: Vec::new(),
             wall_u: Vec::new(),
             node_tube: Vec::new(),
@@ -514,6 +530,7 @@ impl AirwayNetwork {
         self.wall_rad = zf(n);
         self.has_wall = vec![false; n];
         self.wall_y = zf(n);
+        self.layer_y = zf(n);
         self.wall_v = zf(n);
         self.wall_u = zf(n);
         self.node_tube = vec![0; n];
@@ -1014,6 +1031,12 @@ impl AirwayNetwork {
         let t2 = t * t;
         let mut rad_total = wall_rad_sum;
         let cl = self.closed_area;
+        // the walls' second layer: r·v + k·y = p, by implicit Euler in the node's new pressure
+        // (taken explicitly from p(n), a strong layer on a narrow section, whose compliance is
+        // small, went unstable). y(n+1) = gain·(y + T·p(n+1)/r), so the air the layer takes is
+        // S·gain/r·p(n+1) − S·y·(1 − gain)/T: a conductance and a source in the node's update
+        let layered = self.layer_r > 0.0;
+        let layer_gain = if layered { 1.0 / (1.0 + t * self.layer_k / self.layer_r) } else { 0.0 };
         for k in 0..n {
             if self.fixed[k] {
                 continue;
@@ -1058,9 +1081,21 @@ impl AirwayNetwork {
                     c = c_min;
                 }
             }
+            let (mut gl, mut jl) = (0.0, 0.0);
+            let in_layer = layered && self.has_wall[k];
+            if in_layer {
+                let sa = if self.area[k] > min_a { self.sqrt_a[k] } else { sqrt(min_a) };
+                let s = self.wall_perim[k] * sa * self.dx[k];
+                gl = s * layer_gain / self.layer_r;
+                jl = s * self.layer_y[k] * (1.0 - layer_gain) * inv_t;
+            }
             let r = self.rad_of[k];
             if r < 0 {
-                self.p[k] += (t / c) * self.flow_sum[k];
+                if in_layer {
+                    self.p[k] = (self.p[k] * c * inv_t + self.flow_sum[k] + jl) / (c * inv_t + gl);
+                } else {
+                    self.p[k] += (t / c) * self.flow_sum[k];
+                }
             } else {
                 let r = r as usize;
                 let a = if self.area[k] > 1e-4 { self.area[k] } else { 1e-4 };
@@ -1079,13 +1114,20 @@ impl AirwayNetwork {
                 // unstable at small apertures. U_L lives at integer steps; the node sees its mean.
                 let h = t / (2.0 * lr);
                 let g = 0.5 / rr;
-                let p_new = (p_old * (c * inv_t - 0.5 * h - g) + self.flow_sum[k] - ul_prev) / (c * inv_t + 0.5 * h + g);
+                let p_new = if in_layer {
+                    (p_old * (c * inv_t - 0.5 * h - g) + self.flow_sum[k] - ul_prev + jl) / (c * inv_t + 0.5 * h + g + gl)
+                } else {
+                    (p_old * (c * inv_t - 0.5 * h - g) + self.flow_sum[k] - ul_prev) / (c * inv_t + 0.5 * h + g)
+                };
                 self.p[k] = p_new;
                 let ul = ul_prev + h * (p_old + p_new);
                 self.rad_ul[r] = ul;
                 let ur = 0.5 * (ul_prev + ul) + g * (p_new + p_old);
                 self.rad_u[r] = ur;
                 rad_total += ur;
+            }
+            if in_layer {
+                self.layer_y[k] = (self.layer_y[k] + t * self.p[k] / self.layer_r) * layer_gain;
             }
         }
         let out = (rad_total - self.rad_prev_total) * inv_t;
@@ -1193,6 +1235,8 @@ impl AirwayNetwork {
             wall_r: self.wall_r.clone(),
             wall_k: self.wall_k.clone(),
             wall_rad: self.wall_rad.clone(),
+            layer_r: self.layer_r,
+            layer_k: self.layer_k,
             fixed: self.fixed.clone(),
             rad_nodes: self.rad_nodes.clone(),
             rad_area: self.rad_nodes.iter().map(|&k| js_max(a_t[k], 1e-4)).collect(),
@@ -1212,6 +1256,7 @@ impl AirwayNetwork {
         self.l_prev.fill(0.0);
         self.wall_y.fill(0.0);
         self.wall_v.fill(0.0);
+        self.layer_y.fill(0.0);
         self.rad_ul.fill(0.0);
         self.rad_l_prev.fill(0.0);
         self.rad_prev_total = 0.0;

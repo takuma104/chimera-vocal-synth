@@ -106,3 +106,66 @@ fn fdtd_stays_stable_with_a_non_uniform_tube_and_tiny_constriction() {
     }
     assert!(tail < peak * 0.01, "tail {tail:e} vs peak {peak:e}");
 }
+
+/// The walls' second layer (no mass: a resistance against a stiffness) is a loss that grows with
+/// the square of the frequency up to its corner: it widens the upper resonances and leaves the
+/// first nearly as it was, in the frequency-domain model and in the FDTD alike.
+#[test]
+fn a_wall_layer_widens_the_upper_resonances_and_leaves_the_first() {
+    let fr = linspace(50.0, 5000.0, 6000);
+    let widths = |layer: bool| -> (Vec<Peak>, Vec<Peak>) {
+        let (mut net, tube) = uniform_tube(96000.0, true);
+        if layer {
+            net.layer_r = 1000.0;
+            net.layer_k = 2.0 * PI * 8000.0 * 1000.0;
+        }
+        let model: Vec<Peak> = find_peaks(&fr, &transfer_function(&net.linear_elements(), tube.first_node(), &fr, &[]).mag, 80.0).into_iter().filter(|p| p.freq < 4800.0).collect();
+        let got = fdtd_peaks(&mut net, tube.first_node(), 0.5);
+        (model, got)
+    };
+    let (plain, _) = widths(false);
+    let (layered, heard) = widths(true);
+    let (first, fourth) = (nearest(&plain, 480.0), nearest(&plain, 3400.0));
+    let (first_l, fourth_l) = (nearest(&layered, 480.0), nearest(&layered, 3400.0));
+    println!("first: {:.1} Hz wide → {:.1}; fourth: {:.1} → {:.1}", first.bw, first_l.bw, fourth.bw, fourth_l.bw);
+    assert!(first_l.bw - first.bw < 8.0, "the first resonance is {:.1} Hz wider", first_l.bw - first.bw);
+    assert!(fourth_l.bw - fourth.bw > 40.0, "the fourth resonance is only {:.1} Hz wider", fourth_l.bw - fourth.bw);
+    // the resonances stay where they were, and the FDTD's are the model's
+    for r in &layered {
+        let g = nearest(&heard, r.freq);
+        assert!((g.freq - r.freq).abs() / r.freq < 0.012, "{:.1} vs {:.1} Hz", g.freq, r.freq);
+        if r.freq > 2000.0 {
+            assert!((g.bw - r.bw).abs() / r.bw < 0.3, "at {:.0} Hz the FDTD's resonance is {:.1} Hz wide, the model's {:.1}", r.freq, g.bw, r.bw);
+        }
+    }
+}
+
+/// A strong layer on a narrow section: the section's compliance is small, and with the air the
+/// layer takes computed from the pressure of the step before, the node's update overshot and the
+/// airway blew up (a layer thirty times the strength above gave NaN within a render). It is
+/// implicit in the node's new pressure now.
+#[test]
+fn a_strong_wall_layer_stays_stable_on_a_narrow_section() {
+    let mut net = AirwayNetwork::new(96000.0);
+    let areas: Vec<f64> = (0..40).map(|i| if (24..27).contains(&i) { 0.02 } else { 0.5 + 4.0 * pow(sin((i as f64 / 39.0) * PI), 2.0) }).collect();
+    let t = net.add_tube(TubeSpec::new("t", 40, 17.0, Area::Profile(areas)).wall(Some(WallParams { mass: 1.5, resistance: 1600.0, stiffness: 3e5 })));
+    net.add_radiation(t.last_node());
+    net.finalize();
+    net.layer_r = 1000.0 / 30.0;
+    net.layer_k = 2.0 * PI * 8000.0 * net.layer_r;
+    net.begin_block(1);
+    let mut peak: f64 = 0.0;
+    for i in 0..48000 {
+        if i < 2000 {
+            net.ext_flow[t.first_node()] = 300.0 * sin(i as f64 * 0.05);
+        }
+        let y = net.step();
+        peak = js_max(peak, y.abs());
+        assert!(y.is_finite(), "non-finite at {i}");
+    }
+    let mut tail: f64 = 0.0;
+    for _ in 0..9600 {
+        tail = js_max(tail, net.step().abs());
+    }
+    assert!(tail < peak * 0.01, "tail {tail:e} vs peak {peak:e}");
+}

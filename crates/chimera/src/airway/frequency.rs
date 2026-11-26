@@ -105,6 +105,14 @@ pub fn transfer_function(el: &LinearElements, inject: usize, freqs: &[f64], cut:
                 w_yi[k] = (-el.wall_area[k] * zi) / d;
                 gr += w_yr[k];
                 gi += w_yi[k];
+                if el.layer_r > 0.0 {
+                    // the walls' second layer: Y = S / (r − jk/ω)
+                    let zr = el.layer_r;
+                    let zi = -el.layer_k / w;
+                    let d = zr * zr + zi * zi;
+                    gr += (el.wall_area[k] * zr) / d;
+                    gi += (-el.wall_area[k] * zi) / d;
+                }
             }
             rad_yr[k] = 0.0;
             rad_yi[k] = 0.0;
