@@ -194,3 +194,36 @@ fn an_area_profile_of_zeros_changes_nothing_and_another_moves_the_resonances() {
     assert!(plain.iter().zip(&own).any(|(p, o)| (p - o).abs() / p > 0.03), "{plain:?} against {own:?}");
     assert_eq!(resonances(&mut w, &[]), plain);
 }
+
+/// The noise's random numbers are drawn one a source in turn, so a source that joins the list
+/// changes every other source's noise from then on: two renders of a voice whose gestures
+/// differ by a hair came apart for good at the first narrowing (a constriction's source joined
+/// one control step sooner in one of them; the breath noise after it was another draw, -20 dB
+/// against the signal). With `noise_draws` set, a source's noise is its own.
+#[test]
+fn with_noise_draws_a_source_sounds_the_same_whatever_other_sources_there_are() {
+    use chimera::airway::network::{NoiseSpec, PortSpec};
+    let heard = |draws: usize, another: bool| -> Vec<f64> {
+        let mut net = AirwayNetwork::new(96000.0);
+        let areas: Vec<f64> = (0..40).map(|i| if (30..32).contains(&i) { 0.1 } else { 3.0 }).collect();
+        let t = net.add_tube(TubeSpec::new("t", 40, 17.0, Area::Profile(areas)));
+        let lungs = net.add_pressure_node("lungs");
+        net.add_port(lungs, t.first_node(), PortSpec::new(2.5, 1.0).kinetic(0.0, 0.0));
+        net.add_radiation(t.last_node());
+        net.finalize();
+        net.set_fixed_pressure(lungs, 8000.0);
+        net.noise_draws = draws;
+        let jet = NoiseSpec::new(t.branch(30), t.branch(33), t.branch(27), 3e-6);
+        let silent = NoiseSpec::new(t.branch(10), t.branch(12), t.branch(8), 0.0);
+        let list = [jet, silent];
+        net.set_noise_sources(if another { &list } else { &list[..1] });
+        (0..4800).map(|_| net.step()).collect()
+    };
+    let level = |x: &[f64]| sqrt(x[2400..].iter().map(|v| v * v).sum::<f64>() / 2400.0);
+    let apart = |a: &[f64], b: &[f64]| level(&a.iter().zip(b).map(|(p, q)| p - q).collect::<Vec<_>>()) / level(a);
+    let (alone, joined) = (heard(0, false), heard(0, true));
+    assert!(level(&alone) > 0.0 && alone.iter().all(|v| v.is_finite()));
+    println!("one a source: the jet's noise with a silent second source differs by {:.2} of its level", apart(&alone, &joined));
+    assert!(apart(&alone, &joined) > 0.05, "a second source was expected to change the first one's noise");
+    assert_eq!(heard(2, false), heard(2, true));
+}

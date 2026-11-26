@@ -338,6 +338,12 @@ pub struct AirwayNetwork {
     pub viscous_omega: f64,
     /// scale on turbulence noise gain
     pub noise_scale: f64,
+    /// Random numbers drawn a sample for the turbulence noise, whatever the number of sources:
+    /// source i takes the i-th (those past the last take the last). 0 (the default): one a
+    /// source, drawn in turn, so that every source's noise depends on how many sources there
+    /// are; when a source joins the list a control step sooner, all the noise that follows is
+    /// another draw (two renders of all but the same gestures then differ by -20 dB for good).
+    pub noise_draws: usize,
     /// last output sample (radiated pressure derivative)
     pub out: f64,
 }
@@ -435,6 +441,7 @@ impl AirwayNetwork {
             viscous_scale: 1.0,
             viscous_omega: 2.0 * PI * 700.0,
             noise_scale: 1.0,
+            noise_draws: 0,
             out: 0.0,
         }
     }
@@ -1140,6 +1147,11 @@ impl AirwayNetwork {
         // white noise power per Hz scales with fs: normalise to a 96 kHz reference
         let scale = self.noise_scale * sqrt(96000.0 / self.fs);
         let sat = 12000.0 * 12000.0 - RE_CRIT * RE_CRIT;
+        let fixed = self.noise_draws.min(8);
+        let mut drawn = [0.0; 8];
+        for w in drawn.iter_mut().take(fixed) {
+            *w = self.rng.bipolar() * 1.732;
+        }
         for i in 0..self.noise.len() {
             let s = &mut self.noise[i];
             let a = self.branch_area[s.src];
@@ -1154,7 +1166,7 @@ impl AirwayNetwork {
                 }
             }
             // white → high-pass (1st order) → 2nd-order low-pass
-            let w = self.rng.bipolar() * 1.732;
+            let w = if fixed > 0 { drawn[i.min(fixed - 1)] } else { self.rng.bipolar() * 1.732 };
             s.hp += (1.0 - s.hp_coef) * (w - s.hp); // s.hp holds a low-passed copy
             let hp_out = w - s.hp;
             s.lp1 += s.lp_coef * (hp_out - s.lp1);
